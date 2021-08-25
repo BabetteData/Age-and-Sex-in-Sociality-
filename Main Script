@@ -1,0 +1,777 @@
+## STEP 1: Clear workspace and load packages ------------------------------------------------
+rm(list = ls())
+
+setwd("//")
+
+library(network)
+library(sna)
+library(intergraph)
+library(graphlayouts)
+library(roughnet)
+library(plyr)
+
+library(BAMMtools)
+library(classInt)
+
+library(dplyr)
+library(lubridate)
+library(igraph)
+library(asnipe)
+library(ggraph)
+library(ggplot2)
+library(GGally)
+library(data.table)
+
+## STEP 2: IMPORT DATA ------------------------------------------------------------
+
+#Import information for age and for sex 
+BasicBirdInfo <- read.csv("BirdBasicInfo.csv")
+BBInfo <- select(BasicBirdInfo, "BirdID", "Cohort", "SexEstimate", "EggDate", "HatchDate")
+
+#CHECK HOW MANY HATCH DATE NA VALUES ARE LEFT 
+sum(is.na(BBInfo$HatchDate))
+sum(BBInfo$HatchDate == "")
+str(BBInfo)
+
+## STEP 3: SET COHORT DATE AS 01/06/----
+#BBInfo$Cohort <- lubridate::ymd(BBInfo$Cohort, truncated = 2L) sets to 01/01
+BBInfo$Cohort <- paste(BBInfo$Cohort, "0601",sep = "") #sets to 01/06
+
+#SET ALL DATES AS DATES
+BBInfo$Cohort <- ymd(BBInfo$Cohort)
+BBInfo$HatchDate <-dmy(BBInfo$HatchDate) #set as date
+BBInfo$EggDate <- dmy(BBInfo$EggDate) # set as date 
+
+#REPLACE NA VALUES IN HD WITH ED
+invalid.dates <- is.na(BBInfo$HatchDate)
+
+if(any(invalid.dates)) {
+  BBInfo$HatchDate[invalid.dates] <- BBInfo$EggDate[invalid.dates]
+}
+
+#REPLACE REMAINING NA VALUES IN HD WITH COHORT DATE 
+invalid.dates <- is.na(BBInfo$HatchDate)
+
+if(any(invalid.dates)) {
+  BBInfo$HatchDate[invalid.dates] <- BBInfo$Cohort[invalid.dates]
+}
+
+#Import RFID data
+rfidraw<-read.csv("20210225RfidExpanded.csv")
+rfid <- select(rfidraw, Date, Time, RFID, BirdID, DateTime, Sex, Season, Year)
+
+#Merge to single data sheet
+rfid <- merge(rfid, BBInfo, by = "BirdID") #merge into single data sheet
+View(rfid)
+str(rfid)
+
+write.csv(rfid, "rfid1.csv", row.names = FALSE)
+
+## STEP 4: Calculate AGE -----------------------------------------------------------------
+
+rfid <- read.csv("rfid1.csv")
+
+# SET DATA COLUMNS AS THE RIGHT TYPE OF DATA
+str(rfid)
+rfid$BirdID <- as.character(rfid$BirdID)
+rfid$Date <- ymd(rfid$Date) 
+rfid$Sex <- as.character(rfid$Sex)
+rfid$DateTime <- ymd_hms(rfid$DateTime) #set as date and time
+rfid$HatchDate <- ymd(rfid$HatchDate)
+
+#Calculate ages
+rfid <- rfid %>% mutate (AgeDays = difftime(Date, HatchDate, units = c("days")),
+                         AgeYears = (AgeDays/365.25))#calculate ages 
+
+rfid$AgeDays <- as.numeric(rfid$AgeDays)
+rfid$AgeYears <- as.numeric(rfid$AgeYears)
+
+
+#####      rfid$DateTime <- round_date(rfid$DateTime, "10 seconds") #round the seconds 
+#####      rfid <- rfid[!duplicated(rfid$DateTime),] #remove duplicates after rounding
+
+#Create the time difference 
+rfid2 <- rfid %>% mutate(DateTime = ymd_hms(paste(rfid$Date, rfid$Time, sep = " ")),
+                         location = rep("FY"))%>%
+  arrange(DateTime) %>%
+  mutate(formatted.time = as.numeric(DateTime - DateTime[1])) 
+
+write.csv(rfid2, "ReadyToSplit.csv", row.names = FALSE)
+
+## STEP 5: SOCIAL NETWORK SERIES ONE: BY BREEDING SEASON----------------------------------------------------------
+
+#Months 1:3 = pre breeding 
+#Months 4:8 = breeding 
+#months 9:12 = post breeding 
+#breeding stages are key in aging for birds, defines the years for them 
+A <- read.csv("ReadyToSplit.csv")
+
+A$Month <- month(A$Date)
+
+A <- A %>% 
+  mutate(SeasonMonth = case_when(
+    between(Month, 1, 3) ~ "PreBreeding",
+    between(Month, 4, 8) ~ "Breeding",
+    between(Month, 9,12) ~ "PostBreeding"
+  ))
+
+A$class <- paste0(A$Year, A$SeasonMonth)
+
+A <- select(A, - Cohort, -EggDate, - HatchDate, - Month, - SeasonMonth)
+
+#split by class 
+
+SplitA <- split.data.frame(A, A$class) #split data by year/period
+View(SplitA)
+#14 lists 
+
+saveRDS(SplitA, file = "RFIDbySeasonBeforeSN.RDS")
+
+
+## STEP 6: SOCIAL NETWORK SERIES DIVIDE TWO: BY SHORT CLUSTERS -----------------
+
+B <- read.csv("ReadyToSplit.csv")
+
+B <- B %>% 
+  mutate(DateofData = difftime(Date, min(Date), units = c("days")))
+
+B$DateofData <- as.numeric(B$DateofData)
+
+#Put all the days in a separate vector
+DateVector <- unique(as.numeric(c(B$DateofData)))
+DateVector <- sort(DateVector)
+View(DateVector)
+
+DateVector <- tibble(DateofData = DateVector) #as a table
+
+classIntervals(DateVector$DateofData, style="kmeans") #divide by k means
+#Divided into 11 groups between 37 and 117
+#split into the 11 groups
+
+DateVector <- DateVector %>% 
+  mutate(GroupLetter = case_when(
+    between(DateofData, 0, 566.5) ~ "A",
+    between(DateofData, 566.5, 1420) ~ "B",
+    between(DateofData, 1420,1729) ~ "C", 
+    between(DateofData, 1729,1980.5) ~ "D", 
+    between(DateofData, 1980.5,2051) ~ "E",
+    between(DateofData, 2051,2117.5) ~ "F",
+    between(DateofData, 2117.5,2180.5) ~ "G",
+    between(DateofData, 2180.5,2305) ~ "H",
+    between(DateofData, 2305,2448.5) ~ "I",
+    between(DateofData, 2448.5,3232) ~ "J",
+    between(DateofData, 3232,3934) ~ "K"
+  ))
+
+#Lets continue to divide them into 7 roughly 10 day groups
+
+library(groupdata2) #load package 
+
+#Divide reminaing groups by greedy (equally split remainder amongst groups)
+DateVector <- DateVector %>% 
+  group_by(GroupLetter)%>%
+  group(n = 10, 
+        method = "greedy")
+
+DateVector$Finalgroup <- paste(DateVector$GroupLetter, DateVector$.groups) #combine columns for unique ID of groups
+DateVector <- subset(DateVector, select = c(DateofData, Finalgroup))
+
+DateVector %>%
+  group_by(Finalgroup)%>%
+  count(length(Finalgroup)) #check the date differences 
+
+B <- merge(B, DateVector, by = "DateofData")
+#Match up our created groups to the RFID data so we can use it to split the SN! 
+
+
+SplitB <- split.data.frame(B, B$Finalgroup) #split data by year/period
+View(SplitB)
+#74 lists 
+
+saveRDS(SplitB, file = "RFIDbyClusterBeforeSN.RDS")
+
+
+## STEP 7: SOCIAL NETWORK FOR LOOPS!------------------------------------------------
+
+# FOR LOOP TO CREATE EDGE/NODE LISTS AND FINAL PRODUCT 
+#EDIT AS NECESSARY FOR DATA BEING INPUTTED 
+#INTERVAL DEFINES THE TIME 
+
+interval <- 1
+y <- data.frame()
+U <- data.frame()
+for(i in SplitA){
+  subset <- i
+  #subset <- unique(subset) #remove duplicate ids within the same second
+  subset$date.time <- ymd_hms(paste(subset$Date, subset$Time, sep = " ")) #create time point
+  subset <- subset %>% arrange(date.time) %>% mutate(time.diff = as.numeric(date.time - lag(date.time))) #calculate time elapsed before next entry
+  subset$time.diff[1] <- 0 #replace first NA with 0 to assign flock
+  median(subset$time.diff)
+  subset$flock <- cumsum(ifelse(subset$time.diff > interval,1,0)) #assign flock id based on time elapsed (600s)
+  #create edge list
+  nodes <- subset %>% distinct(RFID, .keep_all = TRUE) #list of all birds in the subset
+  #U <- as.data.frame(rbind(U,nodes))
+  edgelist <- subset %>% group_by(flock) %>%  #within each flock
+    distinct(RFID) %>% filter(n()>1) %>% dplyr::summarise(ind1 = t(combn(RFID,2))[,1], ind2 = t(combn(RFID,2))[,2]) %>% #return all pairwise combination of IDs
+    ungroup() %>% group_by(ind1, ind2) %>% dplyr::summarize(weight=n()) %>% ungroup() # count how many times each pair is recorded
+  
+  #edgelist <- merge(edgelist, nodes, by.x = "ind1", by.y = "RFID")
+  #y<- as.data.frame(rbind(y, edgelist))
+  #Create network
+  network <- graph_from_data_frame(d = edgelist, vertices = nodes$RFID, directed = FALSE)
+  #Calculate network metrics
+  network.metrics <- nodes %>% mutate(degree = igraph::degree(network),
+                                      strength = igraph::strength(network, vids = RFID),
+                                      betweenness = igraph::betweenness(network, v = RFID, directed = TRUE, nobigint = FALSE), 
+                                      Density = igraph::edge_density(network, loops = FALSE))
+  y<- as.data.frame(rbind(y, network.metrics))
+}
+
+write.csv(U, "SeasonNodeList.csv", row.names = FALSE)
+write.csv(y, "SeasonEdgeList.csv", row.names = FALSE)
+
+write.csv(y, "RFIDBYSEASONTRYAGAIN2.csv", row.names = FALSE)
+
+#
+
+SplitA <- split.data.frame(A, A$Seasonalgroup) #split data by year/period
+
+
+interval <- 1
+y <- data.frame()
+U <- data.frame()
+for(i in SplitA){
+  subset <- i
+  #subset <- unique(subset) #remove duplicate ids within the same second
+  subset$date.time <- ymd_hms(paste(subset$Date, subset$Time, sep = " ")) #create time point
+  subset <- subset %>% arrange(date.time) %>% mutate(time.diff = as.numeric(date.time - lag(date.time))) #calculate time elapsed before next entry
+  subset$time.diff[1] <- 0 #replace first NA with 0 to assign flock
+  median(subset$time.diff)
+  subset$flock <- cumsum(ifelse(subset$time.diff > interval,1,0)) #assign flock id based on time elapsed (600s)
+  #create edge list
+  nodes <- subset %>% distinct(RFID, .keep_all = TRUE) #list of all birds in the subset
+  U <- as.data.frame(rbind(U,nodes))
+  edgelist <- subset %>% group_by(flock) %>%  #within each flock
+    distinct(RFID) %>% filter(n()>1) %>% dplyr::summarise(ind1 = t(combn(RFID,2))[,1], ind2 = t(combn(RFID,2))[,2]) %>% #return all pairwise combination of IDs
+    ungroup() %>% group_by(ind1, ind2) %>% dplyr::summarize(weight=n()) %>% ungroup() # count how many times each pair is recorded
+  edgelist <- 
+    y<- as.data.frame(rbind(y, edgelist))
+  
+}
+NodesSeason <- read.csv("SeasonNodeList.csv")
+EdgeSeason <- read.csv("SeasonEdgeList.csv")
+EdgeSeason <- select(EdgeSeason, ind1, ind2, weight)
+
+Edge1 <- y
+NodesSeason <- U
+Edge1 <- select(EdgeSeason, ind1, ind2, weight, Date, Seasonalgroup)
+Nodes <- distinct(NodesSeason)
+Nodes <- select(Nodes, RFID, Seasonalgroup)
+
+
+#OXFORD ALGORITHM
+y <- data.frame()
+for(i in ss){
+  assoc <- vector()
+  assoc <- gmmevents(time = i$formatted.time, identity = i$RFID, location = i$location)
+  network.ox <- matrix(nrow = length(unique(i$RFID)), ncol = length(unique(i$RFID))) 
+  inetwork.ox <- vector()
+  network.ox <- get_network(assoc[[1]]) #Get association matrix
+  inetwork.ox<- graph_from_adjacency_matrix(network.ox, weighted = TRUE, mode = "undirected") #Convert it to pass into igraph
+  nodes <- i %>% distinct(RFID)
+  nodes1 <- i  %>% distinct(RFID, .keep_all = TRUE)
+  inetwork.metrics <- nodes %>% mutate(
+    degree = degree(inetwork.ox),
+    strength = strength (inetwork.ox),
+    betweenness = betweenness(inetwork.ox, directed = TRUE, nobigint = FALSE),
+    BirdID = nodes1$BirdID, 
+    Date = nodes1$Date, 
+    Sex = nodes1$Sex, 
+    SeasonRange = nodes1$SeasonRange, 
+    Season = nodes1$Season, 
+    Year = nodes1$Year, 
+    AgeYears = nodes1$AgeYears,
+    Density = edge_density(inetwork.ox, loops = FALSE)
+  ) 
+  y<- as.data.frame(rbind(y, inetwork.metrics))
+}
+
+
+
+## STAGE 8: Analysis: SEASONAL NETWORKS --------------------------
+
+x <- read.csv("PostSN/SeasonRFID1secAssoc.csv")
+
+table(x$class)
+x <- y
+#scale sn metrics by their social networks (Finalgroup) 
+x <- x %>%
+  group_by(class)%>%
+  mutate(S1 = scale(strength), 
+         D1 = scale(degree), 
+         B1 = scale(betweenness))%>%
+  ungroup()
+
+#Remove NA values 
+table(is.na(x))
+#table(is.na(x$B1))
+x <- x[!is.na(x$B1), ] 
+#x <- x[!is.na(x$Sex), ] 
+
+summary(x$Density)
+
+#x$B1 <- ifelse(is.na(x$B1), x$betweenness, x$B1)
+#x$D1 <- ifelse(is.na(x$D1), x$degree, x$D1)
+table(x$class)
+#Repeats only
+table(table(x$BirdID))
+501-249
+length(unique(x$BirdID))
+#x <- x %>% distinct()
+#x <- x %>% group_by(x$BirdID) %>% filter(n()>1)
+#table(table(x$BirdID))
+
+x <- select(x, DateofData, Date, BirdID, Sex, class, strength, degree, betweenness, Density, S1, D1, B1)
+
+str(x)
+x$Date <- ymd(x$Date)
+x$BirdID <- as.character(x$BirdID)
+x$Sex <- as.character(x$Sex)
+
+#Import information for age  
+BasicBirdInfo <- read.csv("BirdBasicInfo.csv")
+BBInfo <- select(BasicBirdInfo, "BirdID", "Cohort", "EggDate", "HatchDate")
+
+#CHECK HOW MANY HATCH DATE NA VALUES ARE LEFT 
+sum(is.na(BBInfo$HatchDate))
+sum(BBInfo$HatchDate == "")
+str(BBInfo)
+
+#BBInfo$Cohort <- lubridate::ymd(BBInfo$Cohort, truncated = 2L) sets to 01/01
+BBInfo$Cohort <- paste(BBInfo$Cohort, "0601",sep = "") #sets to 01/06
+
+#SET ALL DATES AS DATES
+BBInfo$Cohort <- ymd(BBInfo$Cohort)
+BBInfo$HatchDate <-dmy(BBInfo$HatchDate) #set as date
+BBInfo$EggDate <- dmy(BBInfo$EggDate) # set as date 
+
+#REPLACE NA VALUES IN HD WITH ED
+invalid.dates <- is.na(BBInfo$HatchDate)
+
+plot(BBInfo$HatchDate)
+
+if(any(invalid.dates)) {
+  BBInfo$HatchDate[invalid.dates] <- BBInfo$EggDate[invalid.dates]
+}
+
+#REPLACE REMAINING NA VALUES IN HD WITH COHORT DATE 
+invalid.dates <- is.na(BBInfo$HatchDate)
+
+if(any(invalid.dates)) {
+  BBInfo$HatchDate[invalid.dates] <- BBInfo$Cohort[invalid.dates]
+}
+
+#Merge to single data sheet
+x <- merge(x, BBInfo, by = "BirdID") #merge into single data sheet
+
+str(x)
+x <- x %>% mutate(AgeDays = difftime(Date, HatchDate, units = c("days")),
+                  AgeYears = (AgeDays/365))#calculate ages 
+
+x$AgeDays <- as.numeric(x$AgeDays)
+x$AgeYears <- as.numeric(x$AgeYears)
+x$AgeYears <- round(x$AgeYears, digit = 1)
+x$AgeDays <- round(x$AgeDays, digit = 1)
+
+x <- select(x, -EggDate, -Cohort)
+
+## STAGE 9: HYPOTHESIS 1: REPEATABILITY ----------------------------------------------------
+
+#repeatability for all for strength
+M1 <- MCMCglmm(D1 ~ 1, random = ~ BirdID , data = x)
+summary(M1)
+autocorr(M1$Sol)
+
+RS1 <- M1$VCV[,"BirdID"]/(M1$VCV[,"BirdID"]+M1$VCV[,"units"])
+
+posterior.mode(RS1) # repeatability 
+HPDinterval(RS1) #95CI
+#RERUN FOR DIFFERNT METRICS, SWITCHING OUT THE RESPONSE VARIABLE
+
+#repeatability for FEMALES 0 THEN MALES 1
+D <- filter(x, Sex =="1")
+length(unique(D$BirdID))
+table(table(D$BirdID))
+
+M2 <- MCMCglmm(D1 ~ 1, random = ~ BirdID , data = D)
+summary(M2)
+
+RS2 <- M2$VCV[,"BirdID"]/(M2$VCV[,"BirdID"]+M2$VCV[,"units"])
+
+posterior.mode(RS2) # repeatability 
+HPDinterval(RS2) #95CI
+
+#RERUN CODE SWITCHING OUT THE SEX FILTER, AND THE METRICS 
+
+## STAGE 10: HYPOTHESIS 2: AGE EFFECTS ----------------------------------------
+#plot data to get a feel 
+
+#plot data to get a feel 
+par(mfrow = c(1,2))
+hist(x$AgeYears)
+hist(x$S1)
+plot(x$S1 ~ x$AgeYears)
+cor.test(x$S1,x$AgeYears)
+#Basic Lm 
+library(lme4)
+
+AveByInd <- function(x) mean(x)
+x <- do.call("rbind", as.list(
+  by(x, x["BirdID"], transform, AveAge=AveByInd(AgeYears))))
+
+WithinIndCentr <- function(x) x-mean(x)
+x <- do.call("rbind", as.list(
+  by(x, x["BirdID"], transform, WithinAge=WithinIndCentr(AgeYears))))
+
+x$Density <- as.numeric(x$Density)
+str(x)
+lm2 <- lmer(x$B1 ~ x$WithinAge+x$AveAge+I(x$WithinAge^2)+ x$Density + (1|BirdID) + (1|Sex), data =x)
+summary(lm2)
+
+x <- x[!is.na(x$B1), ] 
+
+
+#Random effects
+#Fixed effects:
+#Between individual slope(AveAge) = not significant, no between individual variation
+#No connection between individuals that live longer and their sociality change 
+#Squared within effect = not significant
+#no quadratic effect of sociality on age 
+
+
+## STAGE 11: PLOTTING OF THE DATA ----------------------------------------------------------
+##PLOT WITHINAGE S1
+library(ggplot2)
+install.packages("egg")
+library(egg)
+
+PlotAA <- ggplot(x, aes(x = WithinAge, y =S1)) +
+  geom_point(shape = 4,
+             col = "grey",
+             size = 1.5 )+
+  labs(y = "Strength")+
+  theme(legend.position="none",
+        axis.title.x = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank(), 
+        axis.line = element_line(colour = "black"),
+        axis.title.y = element_text(size = 15))
+
+
+PlotAB <- ggplot(x, aes(x = AveAge, y =S1)) +
+  geom_point(shape = 4,
+             col = "grey",
+             size = 1.5 )+
+  theme(legend.position="none",
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank(), 
+        axis.line = element_line(colour = "black"), 
+        axis.title =element_blank()) 
+
+PlotBA <- ggplot(x, aes(x = WithinAge, y =D1)) +
+  geom_point(shape = 4,
+             col = "grey",
+             size = 1.5 )+
+  labs(y = "Degree")+
+  theme(legend.position="none",
+        axis.title.x =element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank(), 
+        axis.line = element_line(colour = "black"))+
+  stat_smooth(method = "lm", formula = y ~ x, color = "red", size = 0.5, se = TRUE)
+
+PlotBB <- ggplot(x, aes(x = AveAge, y =D1)) +
+  geom_point(shape = 4,
+             col = "grey",
+             size = 1.5 )+
+  theme(legend.position="none",
+        axis.title.x = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank(), 
+        axis.line = element_line(colour = "black"),
+        axis.title.y = element_blank())+
+  stat_smooth(method = "lm", formula = y ~ x + I(x^2), color = "blue", size = 0.5, se = TRUE)
+
+PlotCA <- ggplot(x, aes(x = WithinAge, y =B1)) +
+  geom_point(shape = 4,
+             col = "grey",
+             size = 1.5 )+
+  labs(y = "Betweenness", x = "Within Individual Age")+
+  theme(legend.position="none",
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank(), 
+        axis.line = element_line(colour = "black"),
+        axis.title.y = element_text(size = 15))
+
+PlotCB <- ggplot(x, aes(x = AveAge, y =B1)) +
+  geom_point(shape = 4,
+             col = "grey",
+             size = 1.5 )+
+  labs(x = "Between individual ages")+
+  theme(legend.position="none",
+        axis.title.y = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank(), 
+        axis.line = element_line(colour = "black"))+
+  stat_smooth(method = "lm", formula = y ~ x, color = "blue", size = 0.5, se = TRUE) 
+
+ggarrange(PlotAA, PlotAB,
+          PlotBA, PlotBB, 
+          PlotCA, PlotCB, 
+          labels = c("A", "B", "C", "D", "E", "F"),
+          ncol = 2, nrow = 3)
+
+#RUNNING NULL MODELS! 
+## STAGE 12: REPEATABILITY NULL MODELS: FOR SEASONAL SOCIAL NETWORKS--------------------------
+#### Break it up by season
+A <- read.csv("20210225RfidExpanded.csv")
+A <- select(A, -Unit, -LastLiveRecord, - Season, -SeasonRange)
+
+A <- A %>% 
+  mutate(Group = case_when(
+    between(Month, 1, 3) ~ "PreBreeding",
+    between(Month, 4, 8) ~ "Breeding",
+    between(Month, 9, 12) ~ "PostBreeding"
+  ))
+
+A$Seasonalgroup <- paste0(A$Year, A$Group)
+
+#A <- read.csv("PreSNRFIDDATA.csv")
+
+str(A)
+A$Date <- ymd(A$Date)
+A$Time <- hms(A$Time)
+A$BirdID <- as.character(A$BirdID)
+A$DateTime <- ymd_hms(A$DateTime)
+A$Sex <- as.character(A$Sex)
+A$RFID <- as.character(A$RFID)
+
+#split by class season
+SplitA <- split.data.frame(A, A$Seasonalgroup) #split data by year/period
+#View(SplitA)
+#14 lists
+
+interval <- 1
+y <- data.frame()
+U <- data.frame()
+for(i in SplitA){
+  subset <- i
+  #subset <- unique(subset) #remove duplicate ids within the same second
+  subset$date.time <- ymd_hms(paste(subset$Date, subset$Time, sep = " ")) #create time point
+  subset <- subset %>% arrange(date.time) %>% mutate(time.diff = as.numeric(date.time - lag(date.time))) #calculate time elapsed before next entry
+  subset$time.diff[1] <- 0 #replace first NA with 0 to assign flock
+  median(subset$time.diff)
+  subset$flock <- cumsum(ifelse(subset$time.diff > interval,1,0)) #assign flock id based on time elapsed (600s)
+  #create edge list
+  nodes <- subset %>% distinct(RFID, .keep_all = TRUE) #list of all birds in the subset
+  U <- as.data.frame(rbind(U,nodes))
+  edgelist <- subset %>% group_by(flock) %>%  #within each flock
+    distinct(RFID) %>% filter(n()>1) %>% dplyr::summarise(ind1 = t(combn(RFID,2))[,1], ind2 = t(combn(RFID,2))[,2]) %>% #return all pairwise combination of IDs
+    ungroup() %>% group_by(ind1, ind2) %>% dplyr::summarize(weight=n()) %>% ungroup() # count how many times each pair is recorded
+  edgelist <- 
+    y<- as.data.frame(rbind(y, edgelist))
+  
+}
+NodesSeason <- read.csv("SeasonNodeList.csv")
+EdgeSeason <- read.csv("SeasonEdgeList.csv")
+EdgeSeason <- select(EdgeSeason, ind1, ind2, weight)
+
+Edge1 <- y
+NodesSeason <- U
+Edge1 <- select(EdgeSeason, ind1, ind2, weight, Date, Seasonalgroup)
+Nodes <- distinct(NodesSeason)
+Nodes <- select(Nodes, RFID, Seasonalgroup)
+#SplitNode <- split.data.frame(Nodes, Nodes$Seasonalgroup) #split data by year/period
+
+library(tidyr)
+
+DatesList <- unique(Edge1$Seasonalgroup)
+V <- data.frame()
+Strength <- data.frame()
+Degree <- data.frame()
+Betweenn <- data.frame()
+
+for(x in 1:1000){
+  V <- data.frame()
+  for(i in DatesList){
+    Edge5 <- filter(Edge1, Edge1$Seasonalgroup == i)  
+    Node5 <- filter(Nodes, Nodes$Seasonalgroup == i)
+    Edge5$ind2 <- sample(Edge5$ind2)
+    Edge5$weight <- sample(Edge5$weight)
+    network <-graph_from_data_frame(d = Edge5, vertices=Node5$RFID, directed = FALSE)
+    network.metrics <- Node5 %>% mutate(degree = igraph::degree(network),
+                                        strength = igraph::strength(network, vids = RFID),
+                                        betweenness = igraph::betweenness(network, v = RFID, directed = TRUE, nobigint = FALSE),
+                                        Density = igraph::edge_density(network, loops = FALSE))
+    V <- as.data.frame(rbind(V, network.metrics))
+  }
+  x <- V %>%
+    group_by(Seasonalgroup)%>%
+    mutate(S1 = scale(strength), 
+           D1 = scale(degree), 
+           B1 = scale(betweenness))
+  
+  M1 <- MCMCglmm(S1 ~ 1, random = ~ RFID, data = x)
+  RS1 <- M1$VCV[,"RFID"]/(M1$VCV[,"RFID"]+M1$VCV[,"units"])
+  RepeatabilityE <- posterior.mode(RS1) # repeatability 
+  Strength <- as.data.frame(rbind(Strength, RepeatabilityE))
+  
+  M2 <- MCMCglmm(D1 ~ 1, random = ~ RFID, data = x)
+  RS2 <- M2$VCV[,"RFID"]/(M2$VCV[,"RFID"]+M2$VCV[,"units"])
+  RepeatabilityE2 <- posterior.mode(RS2) # repeatability 
+  Degree <- as.data.frame(rbind(Degree, RepeatabilityE2))
+  
+  M3 <- MCMCglmm(B1 ~ 1, random = ~ RFID, data = x)
+  RS3 <- M3$VCV[,"RFID"]/(M3$VCV[,"RFID"]+M3$VCV[,"units"])
+  RepeatabilityE3 <- posterior.mode(RS3) # repeatability 
+  Betweenn <- as.data.frame(rbind(Betweenn, RepeatabilityE3))
+}
+
+write.csv(Betweenn, "BetweennessNullSeason.csv", row.names = FALSE)
+write.csv(Degree, "DegreeNullSeason.csv", row.names = FALSE)
+write.csv(Strength, "StrengthNullSeason.csv", row.names = FALSE)
+
+## STAGE 13: REPEATABILITY NULL MODELS: FOR K:CLUSTER SOCIAL NETWORKS -------------------------------------
+
+A <- read.csv("PreSNRFIDDATA.csv")
+
+str(A)
+A$Date <- ymd(A$Date)
+A$Time <- hms(A$Time)
+A$BirdID <- as.character(A$BirdID)
+A$DateTime <- ymd_hms(A$DateTime)
+A$Sex <- as.character(A$Sex)
+
+
+#Split by k cluster 
+SplitB <- split.data.frame(A, A$Finalgroup)
+
+interval <- 1
+#y <- data.frame()
+
+subset <- subset(A, Finalgroup == "J 5")
+table(subset$RFID)
+
+table(y$Finalgroup)
+#A1:6 
+#B1:12
+#C1:C8
+#D1:D6
+#E1:E7
+#F1:F7 
+#G1:G7 
+#H1:5  
+#I1:4 
+#J1:7 
+#K1:4 
+
+subset <- unique(subset) #remove duplicate ids within the same second
+subset$date.time <- ymd_hms(paste(subset$Date, subset$Time, sep = " ")) #create time point
+subset <- subset %>% arrange(date.time) %>% mutate(time.diff = as.numeric(date.time - lag(date.time))) #calculate time elapsed before next entry
+subset$time.diff[1] <- 0 #replace first NA with 0 to assign flock
+median(subset$time.diff)
+subset$flock <- cumsum(ifelse(subset$time.diff> interval,1,0)) #assign flock id based on time elapsed (600s)
+#create edge list
+nodes <- subset %>% distinct(RFID, .keep_all= TRUE) #list of all birds in the subset
+edgelist <- subset %>% group_by(flock) %>%  #within each flock
+  distinct(RFID)%>% filter(n()>1) %>% summarise(ind1 = t(combn(RFID,2))[,1], ind2 = t(combn(RFID,2))[,2]) %>% #return all pairwise combination of IDs
+  ungroup() %>% group_by(ind1, ind2) %>% summarize(weight=n()) %>% ungroup() # count how many times each pair is recorded
+#Create network
+network <- graph_from_data_frame(d = edgelist, vertices = nodes$RFID, directed = FALSE)
+#Calculate network metrics
+network.metrics <- nodes %>% mutate(degree = degree(network, v = RFID),
+                                    strength = strength(network, v = RFID),
+                                    betweenness = betweenness(network, v = RFID, directed = TRUE, nobigint = FALSE), 
+                                    Date = nodes$Date,
+                                    BirdID = nodes$BirdID, 
+                                    Sex = nodes$Sex,
+                                    Class = nodes$class,
+                                    Density = edge_density(network, loops = FALSE)
+)
+y<- as.data.frame(rbind(y, network.metrics))
+
+
+
+x <- y
+y <- subset(y, Finalgroup != "J 5")
+write.csv(y, "10DayRFIDSNOutput.csv", row.names = FALSE)
+## STAGE 14: PLOTTING OF REPEATABILITY VALUES ---------------------------------------------
+
+A <- read.csv("RepeatbilityResults.csv") #Repeatability results is a csv made 
+#from the repeatability ouputs previously calculated. 
+
+library(ggplot2)
+library(dplyr)
+str(A)
+B <- A[A$SN.Type == "Large",]
+C <- A[A$SN.Type == "Small",]
+
+dev.off()
+library(gridExtra)
+library(ggpubr)
+ggarrange(Plot1, Plot2, ncol=2,common.legend = TRUE, legend="bottom")
+Plot1
+Plot2
+Plot1
+
+# (1) Pointrange: Vertical line with point in the middle
+Plot1 <- ggplot(B, aes(Metric, Repeatability)) +
+  geom_pointrange(
+    aes(ymin = LowerCI, ymax = UpperCI, color = Group),
+    shape = 16,
+    position = position_dodge(0.5)
+    
+  )+
+  scale_color_manual(values = c("black", "blueviolet", "maroon", "grey"))+
+  coord_flip()+
+  ylim(c(0,0.5))+
+  #theme_bw() +
+  theme(axis.line = element_blank(),
+        axis.title.x = element_text(size = 12, color = "black"),
+        axis.title.y = element_blank(),
+        axis.text.x = element_text(size = 10, color = "black"),
+        axis.text.y = element_text(size = 10, color = "black"),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank(),
+        panel.border = element_rect(colour = "black", fill=NA, size=0.5)) 
+
+# (1) Pointrange: Vertical line with point in the middle
+Plot2 <- ggplot(C, aes(Metric, Repeatability)) +
+  geom_pointrange(
+    aes(ymin = LowerCI, ymax = UpperCI, color = Group),
+    shape = 16,
+    position = position_dodge(0.5)
+    
+  )+
+  scale_color_manual(values = c("black", "blueviolet", "maroon", "grey"))+
+  coord_flip()+
+  ylim(c(0,0.5))+
+  #theme_bw() +
+  theme(axis.line = element_blank(),
+        axis.title.x = element_text(size = 12, color = "black"),
+        axis.title.y = element_blank(),
+        axis.text.x = element_text(size = 10, color = "black"),
+        axis.text.y = element_text(size = 10, color = "black"),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank(),
+        panel.border = element_rect(colour = "black", fill=NA, size=0.5)) 
+
+
