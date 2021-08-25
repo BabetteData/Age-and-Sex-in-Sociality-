@@ -1,0 +1,564 @@
+#THE ASSOCIATION BETWEEN AGE AND SOCIALITY 
+#EXPERIMENTAL SCRIPT FOR EXLPORATION OF DATA
+#BABETTE FOURIE 
+
+#####Clear workspace and load required PACKAGES-------------------------------------------------
+rm(list = ls()) # clear workspace 
+
+setwd("")
+
+library(network)
+library(sna)
+library(intergraph)
+library(graphlayouts)
+library(roughnet)
+library(plyr)
+library(BAMMtools)
+library(classInt)
+library(dplyr)
+library(lubridate)
+library(igraph)
+library(asnipe)
+library(ggraph)
+library(ggplot2)
+library(GGally)
+library(data.table)
+library(MCMCglmm)
+
+##### DATA EXPLORATION ----------------------------------------------------------------------
+BasicBirdInfo <- read.csv("BirdBasicInfo.csv")
+BBInfo <- select(BasicBirdInfo, "BirdID", "Cohort", "SexEstimate", "EggDate", "HatchDate", "NatalBrood", "RearingBrood", "Fostered")
+
+#Note: if dates are set as characters they have empty values,
+#if the dates are set as dates, they have NA values. 
+
+#CHECK HOW MANY HATCH DATE NA VALUES ARE LEFT 
+sum(is.na(BBInfo$HatchDate))
+sum(BBInfo$HatchDate == "")
+str(BBInfo)
+
+#SET COHORT DATE AS 01/01/----
+#BBInfo$Cohort <- lubridate::ymd(BBInfo$Cohort, truncated = 2L) sets to 01/01
+BBInfo$Cohort <- paste(BBInfo$Cohort, "0501",sep = "") #sets to 01/05
+
+#SET ALL DATES AS DATES
+BBInfo$Cohort <- ymd(BBInfo$Cohort)
+BBInfo$HatchDate <-dmy(BBInfo$HatchDate) #set as date
+BBInfo$EggDate <- dmy(BBInfo$EggDate) # set as date 
+
+#REPLACE NA VALUES IN HD WITH ED
+invalid.dates <- is.na(BBInfo$HatchDate)
+
+if(any(invalid.dates)) {
+  BBInfo$HatchDate[invalid.dates] <- BBInfo$EggDate[invalid.dates]
+}
+
+#REPLACE REMAINING NA VALUES IN HD WITH COHORT DATE 
+invalid.dates <- is.na(BBInfo$HatchDate)
+
+if(any(invalid.dates)) {
+  BBInfo$HatchDate[invalid.dates] <- BBInfo$Cohort[invalid.dates]
+}
+
+#SAVE AS NEW CSV FILE. 
+
+write.csv(BBInfo, "BirdInfoDates.csv", row.names = FALSE)
+
+#Import RFID data
+rfidraw<-read.csv("20210225RfidExpanded.csv")
+rfid <- select(rfidraw, Date, Time, RFID, BirdID, DateTime, Sex, SeasonRange, Season, Year)
+
+#Merge to single data sheet
+rfid <- merge(rfid, BIRDDATA, by = "BirdID") #merge into single data sheet
+View(rfid)
+str(rfid)
+
+write.csv(rfid, "rfid1.csv", row.names = FALSE)
+
+
+# Age metrics
+
+#QUICK LOAD DATA FILE 
+rfid <- read.csv("rfid1.csv")
+
+# SET DATA COLUMNS AS THE RIGHT TYPE OF DATA 
+rfid$BirdID <- as.character(rfid$BirdID)
+rfid$Date <- ymd(rfid$Date) 
+rfid$Sex <- as.character(rfid$Sex)
+rfid$DateTime <- ymd_hms(rfid$DateTime) #set as date and time
+
+#CALCULATE AGE METRICS
+rfid$HatchDate <- ymd(rfid$HatchDate)
+
+#Calculate ages
+rfid <- rfid %>% mutate (AgeDays = difftime(Date, HatchDate, units = c("days")),
+                   AgeYears = (AgeDays/364))#calculate ages 
+
+rfid$AgeDays <- as.numeric(rfid$AgeDays)
+rfid$AgeYears <- as.numeric(rfid$AgeYears)
+
+rfid$DateTime <- round_date(rfid$DateTime, "10 seconds") #round the seconds 
+rfid <- rfid[!duplicated(rfid$DateTime),] #remove duplicates after rounding
+
+#Create the time difference 
+rfid2 <- rfid %>% mutate(DateTime = ymd_hms(paste(rfid$Date, rfid$Time, sep = " ")),
+                         location = rep("FY"))%>%
+  arrange(DateTime) %>%
+  mutate(formatted.time = as.numeric(DateTime - DateTime[1])) 
+
+rfid2 <- rfid2 %>% select(BirdID, Date, Time,  RFID, DateTime, Sex, Season, Year, AgeDays, AgeYears, location, formatted.time, Class)
+
+#Break data by year and period 
+
+rfid2$Class <- paste(rfid2$Year, rfid2$Season)
+
+rfid2 <- rfid2[!rfid2$Class=="2015 PreBreeding",] #1 encounter
+rfid2 <- rfid2[!rfid2$Class=="2017 PreBreeding",] #too few data points
+
+ss <- split.data.frame(rfid2, rfid2$Class) #split data by year/period
+View(ss)
+
+saveRDS(ss, file = "DateForSN.RDS")
+
+#EXPERIMENTING WITH DIFFERENT METHODS 
+DIVIDE BY CALENDAR MONTHS (Not needed)
+rfid$year_month <- floor_date(rfid$Date, "month") #divide by calendar months
+rfid$DateTime <- ymd_hms(rfid$DateTime) #set as date and time
+
+rfid$DateTime <- round_date(rfid$DateTime, "10 seconds") #round the seconds 
+rfid <- rfid[!duplicated(rfid$DateTime),] #remove duplicates after rounding
+rfid2 <- rfid %>% mutate(DateTime = ymd_hms(paste(rfid$Date, rfid$Time, sep = " ")),                         location = rep("FY"))%>%
+  arrange(DateTime) %>%
+  mutate(formatted.time = as.numeric(DateTime - DateTime[1])) 
+
+
+rfid2 <- unique(rfid) #filter for unique #DONT RUN
+
+ss <- split.data.frame(rfid2, rfid2$year_month) #split data by week/month
+View(ss)
+
+saveRDS(ss, file = "TryTHREE.RDS")
+AA <- readRDS( "TryTHREE.RDS")
+
+list2env(ss,envir=.GlobalEnv) #create individual variables from each split, DONT USE!
+
+
+#ANOTHER METHOD: DIVIDE BY THE K CLUSTER THAN INTO 10 DAYS
+
+rfid <- rfid %>% 
+  mutate(DateofData = difftime(Date, min(Date), units = c("days")))
+
+rfid$DateofData <- as.numeric(rfid$DateofData)
+
+length(unique(rfid$Date))
+unique(rfid$Date)
+hist(rfid$DateofData, breaks = 690)
+
+Testing the date differences! 
+min(rfid$Date)
+x <- c("2013/04/05", "2010/02/22")
+x <- ymd(x)
+str(x)
+abs(difftime(x[2], x[1], units = c("days"))) #It works
+
+#Put all the days in a separate vector
+DateVector <- unique(as.numeric(c(rfid$DateofData)))
+DateVector <- sort(DateVector)
+View(DateVector)
+
+DateVector <- tibble(DateofData = DateVector) #as a table
+
+classIntervals(DateVector$DateofData, style="kmeans") #divide by k means
+#Divided into 11 groups between 37 and 117
+#split into the 11 groups
+
+
+DateVector <- DateVector %>% 
+  mutate(GroupLetter = case_when(
+    between(DateofData, 0, 566.5) ~ "A",
+    between(DateofData, 566.5, 1420) ~ "B",
+    between(DateofData, 1420,1729) ~ "C", 
+    between(DateofData, 1729,1980.5) ~ "D", 
+    between(DateofData,1980.5,2051) ~ "E",
+    between(DateofData, 2051,2117.5) ~ "F",
+    between(DateofData, 2117.5,2180.5) ~ "G",
+    between(DateofData, 2180.5,2305) ~ "H",
+    between(DateofData, 2305,2448.5) ~ "I",
+    between(DateofData, 2448.5,3232) ~ "J",
+    between(DateofData, 3232,3934) ~ "K"
+  ))
+
+#Lets continue to divide them into 7 roughly 10 day groups
+
+library(groupdata2) #load package 
+
+#Divide reminaing groups by greedy (equally split remainder amongst groups)
+DateVector <- DateVector %>% 
+  group_by(GroupLetter)%>%
+  group(n = 10, 
+        method = "greedy")
+
+DateVector$Finalgroup <- paste(DateVector$GroupLetter, DateVector$.groups) #combine columns for unique ID of groups
+DateVector <- subset(DateVector, select = c(DateofData, Finalgroup))
+
+DateVector %>%
+  group_by(Finalgroup)%>%
+  count(length(Finalgroup)) #check the date differences 
+
+rfid <- merge(rfid, DateVector, by = "DateofData")
+#Match up our created groups to the RFID data so we can use it to split the SN! 
+
+
+
+rfid <- rfid %>% mutate(DateTime = ymd_hms(paste(rfid$Date, rfid$Time, sep = " ")),
+                         location = rep("FY"))%>%
+  arrange(DateTime) %>%
+  mutate(formatted.time = as.numeric(DateTime - DateTime[1])) 
+
+write.csv(rfid, "postmerge.csv")
+
+rfid <- read.csv("postmerge.csv")
+
+rfid <- rfid %>% select(BirdID, Date, Time,  RFID, DateTime, Sex, Season, Year, AgeDays, AgeYears, location, formatted.time)
+
+rfid <- select(rfid, BirdID, RFID, Date, AgeYears, Finalgroup, location, formatted.time, DateofData)
+
+SplitData <- split.data.frame(rfid, rfid$Finalgroup) #split data by week/month
+
+saveRDS(SplitData, file = "ToSubmit.RDS")
+
+#RUN SN'S AND METRICS INTO ONE DATA SET (y)
+y <- data.frame()
+
+i <- `2010 PreBreeding`
+
+assoc <- vector()
+assoc <- gmmevents(time = i$formatted.time, identity = i$RFID, location = i$location)
+network.ox <- matrix(nrow = length(unique(i$RFID)), ncol = length(unique(i$RFID))) 
+inetwork.ox <- vector()
+network.ox <- get_network(assoc[[1]]) #Get association matrix
+inetwork.ox<- graph_from_adjacency_matrix(network.ox, weighted = TRUE, mode = "undirected") #Convert it to pass into igraph
+nodes <- i %>% distinct(RFID)
+View(inetwork.metrics)
+nodes1 <- i  %>% distinct(RFID, .keep_all = TRUE)
+inetwork.metrics <- nodes %>% mutate(
+    degree = degree(inetwork.ox),
+    strength = strength (inetwork.ox),
+    betweenness = betweenness(inetwork.ox, directed = TRUE, nobigint = FALSE), 
+    Date = nodes1$year_month,
+    Year = nodes1$Year,
+    Sex = nodes1$Sex,
+    BirdID = nodes1$BirdID,
+    Time = nodes1$Time,
+    Season = nodes1$Season,
+    AgeinDays = nodes1$AgeDays, 
+    AgeinYears = nodes1$AgeYears
+  ) 
+  View(y)
+  write.csv(inetwork.metrics, "2010PreBreeding.csv")
+
+#Oxford algorithm For loop (HPC THIS SECTION!) ---------------------------------------------------
+
+ss <- readRDS("DataForSN.RDS")
+
+#list2env(ss,envir=.GlobalEnv) #create individual variables from each split, DONT USE!
+
+#Test for loop
+for(i in ss){
+  print(length(i[,"RFID"]))
+}
+
+#RUN SN'S AND METRICS INTO ONE DATA SET (y)
+y <- data.frame()
+for(i in ss){
+  assoc <- vector()
+  assoc <- gmmevents(time = i$formatted.time, identity = i$RFID, location = i$location)
+  network.ox <- matrix(nrow = length(unique(i$RFID)), ncol = length(unique(i$RFID))) 
+  inetwork.ox <- vector()
+  network.ox <- get_network(assoc[[1]]) #Get association matrix
+  inetwork.ox<- graph_from_adjacency_matrix(network.ox, weighted = TRUE, mode = "undirected") #Convert it to pass into igraph
+  nodes <- i %>% distinct(RFID)
+  View(inetwork.metrics)
+  nodes1 <- i  %>% distinct(RFID, .keep_all = TRUE)
+  inetwork.metrics <- nodes %>% mutate(
+    degree = degree(inetwork.ox),
+    strength = strength (inetwork.ox),
+    betweenness = betweenness(inetwork.ox, directed = TRUE, nobigint = FALSE), 
+    Date = nodes1$year_month,
+    Year = nodes1$Year,
+    Sex = nodes1$Sex,
+    BirdID = nodes1$BirdID,
+    Time = nodes1$Time,
+    Season = nodes1$Season,
+    AgeinDays = nodes1$AgeDays, 
+    AgeinYears = nodes1$AgeYears
+  ) 
+  y<- as.data.frame(rbind(y, inetwork.metrics))
+  View(y)
+}
+
+#Save this output as a new data frame 
+write.csv(y, "y.csv", row.names = FALSE)
+
+#If you create the vector in the loop, it will clear it again when running the next loop. 
+
+##ANALYSIS: (1) Standardise the SN metrics and clean data-------------------------------------------------------- 
+
+#LOAD SN METRICS DATA
+y <- read.csv("y.csv")
+
+y$Class <- paste0(y$Year, y$Season)
+
+#library(standardize)
+#y$StrengthNorm <- scale_by(strength~Class, y)
+
+y <- y %>%
+  group_by(Class) %>%
+  mutate(StrengthNorm = (strength - mean(strength))/sd(strength),
+         DegreeNorm = (degree - mean(degree))/sd(degree),
+         BetweenessNorm = (betweenness - mean(betweenness))/sd(betweenness)
+           )
+
+
+
+plot(y$strength ~ y$AgeinDays, pch = 19, cex = 0.5)
+m2 <- lmer(y$strength ~ y$AgeinDays +(1|Year) +(1|BirdID), data = y)
+summary(m2)
+
+AveByind <- function(x) mean(x)
+d2 <- do.call("rbind", as.list(
+  by(y, y["strength"], transform, AveAge = AveByind(AgeinDays))
+))
+hist(d2$AveAge)
+
+WithinIndCant <- function(x) x-mean(x)
+d2 <- do.call("rbind", as.list(
+  by(d2, d2["strength"], transform, WithinAge = WithinIndCant(AgeinDays))
+))
+str(d2)
+
+m4 <- lmer(d2$strength~d2$WithinAge+d2$AveAge + I(d2$WithinAge^2)+(1|BirdID) + (1|Year), data = d2)
+summary(m4)
+
+str(y)
+
+y$Class <- paste0(y$Year, y$Season)
+
+#look at distributions
+hist(y$strength)
+
+#Normalise the data so the points are between 0 and 1 BY SOCIAL NETWORK(CLASS)
+y <- y %>% group_by(Class) %>% mutate(StrengthNorm = scale(strength),
+                                      StrengthDegree = scale(degree), 
+                                      StrengthBetweenness = scale(betweenness))
+
+
+
+
+
+
+y$StrengthNorm <- ave(y$strength, y$Class, FUN = function(x) x/max(x))
+
+y$DegreeNorm <- ave(y$degree, y$Class, FUN = function(x) x/max(x))
+
+y$BetwennessNorm <- ave(y$betweenness, y$Class, FUN = function(x) x/max(x))
+
+normalize <- function(x) {
+  return ((x - min(x)) / (max(x) - min(x)))
+}
+
+#Clean up the data
+y <- select(y, -degree, - strength, - betweenness)
+str(y)
+y$Sex <- as.character(y$Sex)
+y$BirdID <- as.character(y$BirdID)
+
+y$Time <- hms(y$Time)
+y$Time <- hour(y$Time)
+#y$Time <- substr(y$Time, 1, 2)
+
+write.csv(y, "y.csv", row.names = FALSE)
+
+table(table(y$RFID)) #check repeated measures
+
+library(MCMCglmm)
+
+#Strength 
+
+y <- y[!is.na(y$Sex), ]
+table(is.na(y$Sex))
+
+Model1Strength <- MCMCglmm(StrengthNorm ~ AgeinDays, random = ~ Year + BirdID + Sex + Time + Season, data = y)
+Model1Strength <- MCMCglmm(StrengthNorm ~ AgeinDays, random = ~ Year + BirdID + Sex + Season, data = y)
+Model1Strength <- MCMCglmm(StrengthNorm ~ AgeinDays*Sex, random = ~ BirdID + Year + Season, data = y)
+Model1Strength <- MCMCglmm(StrengthNorm ~ AgeinDays, random = ~ Sex + BirdID, data = y,nitt = 300000,burnin=30000, verbose = FALSE)
+Model1Strength <- MCMCglmm(StrengthNorm ~ AgeinDays*Sex, random = ~ BirdID, data = y, nitt = 100000,burnin=30000, verbose = FALSE)
+
+autocorr.diag(Model1Strength$VCV)
+summary(Model1Strength)
+#DIC - smaller DIC models prefered 
+#G structure = random effects (95 credibility interval + post.mean.)
+#R structure: residuals 
+#Fixed effects: if 95CI does not span 0 = Stat. Sig. 
+
+plot(y$StrengthNorm ~ y$AgeinDays)
+
+plot(Model1Strength$Sol)
+plot(Model1Strength$VCV)
+
+#marcov chain must sample independently between 2 subsequent iterations 
+autocorr(Model1Strength$Sol) #check for variables
+#close to 0 is okay, if lag 10 then not 
+autocorr(Model1Strength$VCV)
+#if larger, then run model longer 
+
+#REPEATABILITY 
+RS1 <- Model1Strength$VCV[,"BirdID"]/(Model1Strength$VCV[,"BirdID"]+Model1Strength$VCV[,"units"])
+
+posterior.mode(RS1) # repeatability 
+HPDinterval(RS1) #95CI
+
+#The repeatability for strength is %
+#With a 95CI between % and %
+
+#For random effects (var/total = % variance explained)
+
+#Metric: strength
+interaction.plot(y$Year, y$BirdID, y$StrengthNorm, 
+                 xlab ="AgeinDays", 
+                 ylab = "Strength", 
+                 legend = F, col= c(1:1050))
+
+Model2Strength <- lmer(y$StrengthNorm ~ y$AgeinDays + (1|y$BirdID) + (1|y$Sex))
+summary(Model2Strength)
+
+M4 <- lmer(y$StrengthNorm ~ 1 + (1|y$AgeinDays) + (1|y$BirdID) + (1|y$Sex))
+summary(M4)
+plot(y$StrengthNorm[y$Sex==0]~y$AgeinDays[y$Sex==0], pch = 19, xlim = c(0, 3200), ylim = c(-2,2))
+points(y$StrengthNorm[y$Sex==1]~y$AgeinDays[y$Sex==1], pch = 19, col = "red")
+abline(M4)
+
+##DEGREE
+Model1Degree <- MCMCglmm(DegreeNorm ~ AgeinDays*Sex, random = ~ BirdID, data = y)
+
+summary(Model1Degree)
+#DIC - smaller DIC models prefered 
+#G structure = random effects (95 credibility interval + post.mean.)
+#R structure: residuals 
+#Fixed effects: if 95CI does not span 0 = Stat. Sig. 
+
+plot(y$DegreeNorm~ y$AgeinDays)
+abline(Model1Degree, col = "red")
+
+plot(Model1Strength$Sol)
+plot(Model1Strength$VCV)
+
+#marcov chain must sample independently between 2 subsequent iterations 
+autocorr(Model1Strength$Sol) #check for variables
+#close to 0 is okay, if lag 10 then not 
+autocorr(Model1Strength$VCV)
+#if larger, then run model longer 
+
+#REPEATABILITY 
+RS2 <- Model1Degree$VCV[,"BirdID"]/(Model1Degree$VCV[,"BirdID"]+Model1Degree$VCV[,"units"])
+
+posterior.mode(RS2) # repeatability 
+HPDinterval(RS2) #95CI
+
+#BETWEENNESS
+##DEGREE
+Model1Betweenness <- MCMCglmm(BetwennessNorm ~ AgeinDays*Sex, random = ~ BirdID, data = y)
+
+summary(Model1Betweenness)
+#DIC - smaller DIC models prefered 
+#G structure = random effects (95 credibility interval + post.mean.)
+#R structure: residuals 
+#Fixed effects: if 95CI does not span 0 = Stat. Sig. 
+
+plot(y$BetwennessNorm~ y$AgeinDays)
+abline(Model1Betweenness, col = "red")
+
+plot(Model1Strength$Sol)
+plot(Model1Strength$VCV)
+
+#marcov chain must sample independently between 2 subsequent iterations 
+autocorr(Model1Strength$Sol) #check for variables
+#close to 0 is okay, if lag 10 then not 
+autocorr(Model1Strength$VCV)
+#if larger, then run model longer 
+
+
+#REPEATABILITY 
+RS2 <- Model1Betweenness$VCV[,"BirdID"]/(Model1Betweenness$VCV[,"BirdID"]+Model1Betweenness$VCV[,"units"])
+
+posterior.mode(RS2) # repeatability 
+HPDinterval(RS2) #95CI
+
+#Check all the metrics I want to do?
+#Check each SN has enough data to create SN, if not then filter it to remove shit SN's
+#Calculate repeatabilities! 
+
+
+#The things I am accounting for: 
+#To see if the response (Social network metric) is affected by the predictor (Age)
+#No direct interactions with Age 
+#Random effects that could effect social network metrics include:
+#1. Sex: Different parental contributions/behaviors 
+#2. Date: Account for weather affects/daily changes
+#3: Time: Need for feeding varies across the day 
+#4: Season Stage: Weather it is breeding or not! Need for food increases, more competition? 
+
+#Things I would like to include: 
+#5. Number of cohorts in the SN? % relatedness or just cohort vs. non cohort individual interactions
+#Mutate column: 
+#6. Is this individual breeding or not? Does this individual specifically currently breed?
+#mutate column: Breeding/NonBreeding, If same date - then calculate -  
+#7. Partner relation? Are they feeding with their partner? 
+
+#These social networks tell us about the sociality, but not the type of interactions! 
+#They could be antagonistic, etc. This can be hidden under the data frame. 
+
+##Interaction plots: Date by metrics for INDIVIDUAL BIRDS! 
+#Lmer for each metric
+##MCMCglmm for each metric.
+#Selection of criteria to see if it can be removed or not? 
+#Calculate repeatability!
+
+#Work out how to space the date axis clearly
+#color by sex?
+
+#Metric: strength
+interaction.plot(y$Date, y$BirdID, y$strengthNorm, 
+                 xlab ="Date", 
+                 ylab = "Strength of SN connections", 
+                 legend = F, col= c(1:1050))
+
+Model1Strength <- lmer(y$strengthNorm ~ y$AgeDays + (1|y$Date) + (1|y$BirdID) + (1|y$Sex) + (1|y$Time))
+summary(Model1Strength)
+
++ (1|y$Season)
+
+
+#Variance explain in data by each variable 
+#variable vs. response to see patterns. 
+#lm test gives additional p values. 
+
+#P1 Q + P, how will solve the problem 
+# Why is it important, why study 
+# Why lundy is important 
+#focus narrow, end with questions (restate) and aims 
+#do not repeat intro in the discussion - found this, intersting/why, what does this mean for species, for how we do things, for topic 
+
+#discussion normally longer than introduction 
+#methods - detail explanation on data manipulation. 
+
+Model2Strength <- MCMCglmm(strengthNorm ~ AgeDays, random = ~ Date + BirdID + Sex + Time, data = y)
+summary(Model2Strength)
+
+#AgeDays*BirdID 
+
+#Justify methods/choice of model in thesis. 
+
+#random/fixed = cause variation in data
+#fixed = what you are interested in 
+#random = causes variation but not interested in it. 
