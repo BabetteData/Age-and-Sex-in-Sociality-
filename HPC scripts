@@ -1,0 +1,58 @@
+#HPC needed for algorithm in social networks
+#Adust as needed. Shell Script: 
+
+#!/bin/bash
+#PBS -lwalltime=48:00:00
+#PBS -l select=1:ncpus=1:mem=96gb
+
+cd $PBS_O_WORKDIR
+
+module load anaconda3/personal
+
+echo "R is about to run"
+R --vanilla < PracticeTWO.R
+echo "R is finished running"
+
+
+#end of file
+
+
+#R script to run: 
+library(dplyr)
+library(igraph)
+library(asnipe)
+library(lubridate)
+
+
+ss <- readRDS("//")
+
+
+y <- data.frame()
+for(i in ss){
+  assoc <- vector()
+  assoc <- gmmevents(time = i$formatted.time, identity = i$RFID, location = i$location)
+  network.ox <- matrix(nrow = length(unique(i$RFID)), ncol = length(unique(i$RFID))) 
+  inetwork.ox <- vector()
+  network.ox <- get_network(assoc[[1]]) #Get association matrix
+  inetwork.ox<- graph_from_adjacency_matrix(network.ox, weighted = TRUE, mode = "undirected") #Convert it to pass into igraph
+  nodes <- i %>% distinct(RFID)
+  nodes1 <- i  %>% distinct(RFID, .keep_all = TRUE)
+  inetwork.metrics <- nodes %>% mutate(
+    degree = degree(inetwork.ox),
+    strength = strength (inetwork.ox),
+    betweenness = betweenness(inetwork.ox, directed = TRUE, nobigint = FALSE),
+    BirdID = nodes1$BirdID, 
+    Date = nodes1$Date, 
+    Sex = nodes1$Sex, 
+    SeasonRange = nodes1$SeasonRange, 
+    Season = nodes1$Season, 
+    Year = nodes1$Year, 
+    AgeYears = nodes1$AgeYears,
+    Density = edge_density(inetwork.ox, loops = FALSE)
+  ) 
+  y<- as.data.frame(rbind(y, inetwork.metrics))
+}
+
+
+#Save this output as a new data frame 
+write.csv(y, "//", row.names = FALSE)
